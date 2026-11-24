@@ -25,7 +25,7 @@ This is threshold access control, not threshold decryption: `combine` reassemble
 ## Conventions
 
 - Lengths are in bytes. Every integer field is one unsigned byte, and `byte(i)` is `i` as one.
-- `‖` is concatenation, and `|` separates fields in a layout. `x[a..b]` is bytes `a` up to, not including, `b`.
+- `‖` is concatenation, and `|` separates fields in a layout.
 - SHA-256 is FIPS 180-4. HKDF is RFC 5869 with SHA-256.
 - Domain strings are ASCII, with no terminator.
 - Recipient indexes and share positions count from 0.
