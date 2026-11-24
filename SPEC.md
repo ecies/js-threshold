@@ -8,11 +8,12 @@ An envelope encrypts a message so that any K of its N recipients, together, can 
 
 ```text
 encrypt(recipients[N], K, plaintext, aad)
-  dk       ← 32 random bytes                         the data key
-  share_i  ← Shamir split of dk, one per recipient    33 bytes each
-  entry_i  ← fingerprint(pk_i) | commitment(share_i) | ECIES(pk_i, share_i)
-  header   ← version | suite | K | N | keyCheck(dk) | entry_0 … entry_{N−1}
-  content  ← AEAD(contentKey(dk), nonce, header ‖ aad, plaintext)
+  dk         ← 32 random bytes                       the data key
+  share_i    ← Shamir split of dk, one per recipient  33 bytes each
+  prelude    ← version | suite | K | N | keyCheck(dk) | N × (fingerprint(pk_i) | commitment(share_i))
+  wrapped_i  ← ECIES(pk_i, share_i), bound to i and the prelude
+  header     ← prelude | wrapped_0 … wrapped_{N−1}
+  content    ← AEAD(contentKey(dk), nonce, header ‖ aad, plaintext)
   return header ‖ content
 
 decryptShare(sk_i, envelope)   → share_i, in the share format below
@@ -23,7 +24,7 @@ This is threshold access control, not threshold decryption: `combine` reassemble
 
 ## Conventions
 
-- Lengths are in bytes. Every integer field is one unsigned byte.
+- Lengths are in bytes. Every integer field is one unsigned byte, and `byte(i)` is `i` as one.
 - `‖` is concatenation, and `|` separates fields in a layout. `x[a..b]` is bytes `a` up to, not including, `b`.
 - SHA-256 is FIPS 180-4. HKDF is RFC 5869 with SHA-256.
 - Domain strings are ASCII, with no terminator.
@@ -70,39 +71,52 @@ The suite byte fixes the curve, the ECIES options and the cipher. One cipher bot
 
 ## Keys and fingerprints
 
+A recipient public key must be valid on the suite's curve, or `encrypt` fails with `InvalidArgument`:
+
+- **secp256k1:** a SEC1 point, compressed (33 bytes) or uncompressed (65 bytes), on the curve.
+- **x25519:** 32 bytes holding a canonical u-coordinate, below 2^255 − 19 (so bit 255 is clear), and not of small order: its X25519 shared secret must not be all zeros (RFC 7748, section 6.1).
+- **ed25519:** 32 bytes holding a canonical RFC 8032 encoding (y below 2^255 − 19). The point must lie on the curve and in the prime-order subgroup, and must not be of small order.
+  - The identity point passes the subgroup check, so the small-order check is what rejects it.
+  - Without these checks, the identity point as a recipient key gives a shared point anyone can compute, and so a share anyone can unwrap.
+
+A secret key must be 32 bytes. On secp256k1 it must also lie strictly between 0 and the group order. Otherwise `decryptShare` fails with `InvalidArgument`.
+
 A recipient's canonical public key `pk*` is:
 
 - for secp256k1, the 33-byte compressed SEC1 point, whichever form the caller passed;
-- for x25519, the 32-byte public key;
+- for x25519, the 32-byte u-coordinate;
 - for ed25519, the 32-byte Ed25519 public key.
 
 ```text
 fingerprint = SHA-256("ecies-threshold/v1/fingerprint" ‖ pk*)
 ```
 
-A holder finds their entry by computing their own fingerprint, with no trial decryption. Recipients must be distinct by `pk*`: one person holding two shares would lower the real threshold.
+A holder finds their entry by computing their own fingerprint, with no trial decryption. The fingerprint is computed from the public key that `decryptShare` derives from the secret key. That's why x25519 keys must be canonical: a key with bit 255 set unwraps the same way, but its fingerprint wouldn't match.
+
+Recipients must be distinct by `pk*`, since one person holding two shares lowers the real threshold. This catches the same key passed twice, in any encoding. It doesn't catch distinct keys that one secret key can unwrap. On x25519, for example, `pk` and `pk` plus a small-order point are such a pair. `decryptShare` still finds only the entry whose fingerprint matches the holder's own key.
 
 ## Envelope
 
 ```text
-offset        size    field
-0             1       version = 0x01
-1             1       suite
-2             1       threshold K
-3             1       recipients N
-4             32      key check
-36            N × E   recipient entries, E = 64 + W, each:
-                        +0    32   fingerprint
-                        +32   32   share commitment
-                        +64   W    wrapped share
-36 + N·E      Ln      nonce            (Ln = the suite's nonce length)
-…             16      tag
-…             rest    ciphertext
+offset          size     field
+0               1        version = 0x01
+1               1        suite
+2               1        threshold K
+3               1        recipients N
+4               32       key check
+36              N × 64   recipient table, entry i at 36 + 64·i:
+                           +0    32   fingerprint_i
+                           +32   32   commitment_i
+P = 36 + 64·N   N × W    wrapped shares, wrapped_i at P + W·i
+H = P + N·W     Ln       nonce            (Ln = the suite's nonce length)
+H + Ln          16       tag
+H + Ln + 16     rest     ciphertext
 ```
 
+- **Prelude:** the first `P = 36 + 64·N` bytes are the prelude: everything in the header except the wrapped shares. The wrapped shares and the envelope id are both bound to it.
 - **Header:** the header is the first `H = 36 + N·(64 + W)` bytes, and the content is everything after it.
 - **Size:** the envelope is `H + Ln + 16 + |plaintext|` bytes.
-  - For example, 2-of-3 with suite `0x01` has 194-byte entries, a 618-byte header and 650 bytes of overhead.
+  - For example, 2-of-3 with suite `0x01` takes 194 bytes per recipient. It has a 618-byte header and 650 bytes of overhead.
 - **Limits:** 2 ≤ K ≤ N ≤ 255. K = 1 is plain multi-recipient encryption, which is out of scope.
 
 ## Secret sharing
@@ -118,24 +132,52 @@ offset        size    field
   commitment_i = SHA-256("ecies-threshold/v1/share" ‖ share_i)
   ```
 
-- **Recovery:** Lagrange interpolation at 0 over every supplied share, byte by byte. In a field of characteristic 2, subtraction is addition, so:
+- **Recovery:** byte by byte, Lagrange interpolation through the first K supplied shares, `j, m` in `0 … K−1`. In a field of characteristic 2, subtraction is addition, so:
 
   ```text
-  dk[t] = Σ_j  y_j[t] · Π_{m ≠ j}  x_m / (x_j + x_m)
+  f_t(x) = Σ_j  y_j[t] · Π_{m ≠ j}  (x + x_m) / (x_j + x_m)
+  dk[t]  = f_t(0)
   ```
+
+  Every share after the first K must lie on the same polynomials: `f_t(x_s) = y_s[t]` for every `t`. Otherwise the shares aren't all from one polynomial of degree K − 1. Interpolating through all M supplied shares instead would accept a polynomial of degree up to M − 1, so an envelope could open with M shares while every K-subset fails.
 
 ## Wrapped shares
 
+Each share is wrapped with eciesjs 0.5's ECIES, with one addition: the AEAD takes associated data that binds the wrapped share to its envelope.
+
 ```text
-wrapped_i = ECIES-Encrypt(pk_i, share_i)
+wrapAD_i  = "ecies-threshold/v1/wrap" ‖ byte(i) ‖ prelude
+
+e         ← a fresh secret key on the suite's curve
+E         = e's public key, encoded per the suite's "Ephemeral key" column
+S         = e's public key, encoded per the suite's "HKDF input" column     (the sender point)
+Z         = the shared point, encoded per the suite's "HKDF input" column
+k         = HKDF(IKM = S ‖ Z, salt = empty, info = empty, L = 32)
+nonce     ← Ln random bytes
+ct, tag   ← AEAD-Encrypt(k, nonce, AD = wrapAD_i, share_i)
+
+wrapped_i = E ‖ nonce ‖ tag ‖ ct                                            (W bytes)
 ```
 
-This is under the suite's options, as eciesjs 0.5 implements it (see its [DETAILS.md](https://github.com/ecies/js/blob/master/DETAILS.md)). Its layout is `ephemeral public key ‖ nonce ‖ tag ‖ encrypted share`, exactly `W` bytes.
+The point encodings depend on the curve:
 
-ECIES here takes no associated data, so a wrapped share isn't bound to its envelope directly. The binding comes from its commitment instead:
+- **secp256k1:**
+  - `E` is 65 bytes uncompressed or 33 compressed, per "Ephemeral key".
+  - `S` and `Z = e·pk` are SEC1 points, 65 or 33 bytes, per "HKDF input".
+- **x25519:** `E = S = X25519(e, 9)` and `Z = X25519(e, pk)`, 32 bytes each.
+- **ed25519:**
+  - `E = S` is e's RFC 8032 public key.
+  - `Z = [s]·pk` is a 32-byte Edwards point encoding. `s` is e's RFC 8032 secret scalar: SHA-512 of `e`, clamped, then reduced modulo the group order.
+  - This is not a conversion to X25519.
 
-- the header, commitments included, is the content's associated data;
-- each holder checks their share against its commitment.
+**Unwrapping:** the recipient reads `E`, re-encodes it as `S`, computes `Z` with its own secret key (`sk·E`, `X25519(sk, E)` or `[s]·E`), derives `k` and decrypts with the same `wrapAD_i`.
+
+**Compatibility:** with empty associated data, this is exactly eciesjs 0.5's `encrypt`. Its [DETAILS.md](https://github.com/ecies/js/blob/master/DETAILS.md) predates the sender point and doesn't cover x25519 or ed25519, so the steps above are the reference.
+
+**Why the binding:** without `wrapAD_i`, an entry could be copied whole (fingerprint, commitment and wrapped share) into another envelope.
+
+- **The attack:** a holder asked to approve that decoy would unwrap a share that matches the copied commitment, and hand over their share of the original.
+- **With the binding:** the decoy's prelude differs, so unwrapping fails (`ShareDecryptionFailed`). The index `i` keeps an entry from moving to another position in the same envelope.
 
 ## Key check and content
 
@@ -160,13 +202,15 @@ content               = nonce ‖ tag ‖ ciphertext
 ```text
 offset  size  field
 0       1     version = 0x01
-1       16    envelope id = SHA-256("ecies-threshold/v1/envelope-id" ‖ header)[0..16]
+1       16    envelope id = SHA-256("ecies-threshold/v1/envelope-id" ‖ prelude)[0..16]
 17      1     recipient index i, below N
 18      33    share_i
 ```
 
 - **Size:** 51 bytes.
 - **Envelope id:** a share from another envelope is reported as such, instead of failing its commitment and blaming its holder.
+- **What the id names:** the id covers the prelude, the same bytes the wrapped share is bound to. Any envelope with that prelude has the same data key and shares, so a holder approving a release should approve this id. The exception is an encryptor reusing a data key across envelopes (see [Security considerations](#security-considerations)).
+- **Not an authenticator:** the id is public, so anyone can rewrite it. It labels a share; it doesn't prove where the share came from.
 - **Secrecy:** a share is a secret, since K of them open the envelope. Send it over a confidential channel, for example ECIES-encrypted to the combiner's key.
 
 ## Procedures
@@ -175,12 +219,16 @@ Errors are named after the conditions below. An implementation can report them i
 
 ### encrypt(recipients, K, plaintext, aad, config)
 
-1. **Validate the inputs.** Map `config` to a suite. Check 2 ≤ K ≤ N ≤ 255, then compute each recipient's `pk*`. If any of these fails, or two `pk*` are equal: `InvalidArgument`.
-2. **Split the data key.** Draw `dk`, split it into N shares with threshold K, and compute each entry.
-3. **Build the header.** Compute `keyCheck`, then the header.
-4. **Encrypt the content.** Draw the nonce and encrypt the plaintext with `contentKey`.
-5. **Zero** `dk`, `contentKey` and the shares, as far as the platform allows.
+`aad` defaults to empty, and `config` to eciesjs's default `Config`, which is suite `0x01`.
+
+1. **Validate the inputs.** Map `config` to a suite and check 2 ≤ K ≤ N ≤ 255. Check that every public key is valid on the suite's curve (see [Keys and fingerprints](#keys-and-fingerprints)), and compute its `pk*`. If any of these fails, or two `pk*` are equal: `InvalidArgument`.
+2. **Split the data key.** Draw `dk`, then split it into N shares with threshold K.
+3. **Build the prelude.** Compute `keyCheck`, each fingerprint and commitment, then the prelude.
+4. **Wrap the shares.** Wrap each share with its `wrapAD_i`, then append the wrapped shares to make the header.
+5. **Encrypt the content.** Draw the nonce and encrypt the plaintext with `contentKey`.
 6. **Return** `header ‖ nonce ‖ tag ‖ ciphertext`.
+
+On every path, success or failure, zero `dk`, `contentKey` and the shares, as far as the platform allows.
 
 ### Parsing an envelope
 
@@ -197,41 +245,61 @@ Both `decryptShare` and `combine` start here. Each check runs in order, before a
 ### decryptShare(sk, envelope)
 
 1. **Parse** the envelope.
-2. **Find the entry.** Derive `pk*` from `sk` on the suite's curve, then find the entry with its fingerprint. If there is none: `NotARecipient`.
-3. **Unwrap.** Decrypt the wrapped share with `sk`. If decryption fails: `ShareDecryptionFailed`.
-4. **Check the commitment.** If the share doesn't match its commitment: `CommitmentMismatch`. The envelope was altered or built wrong, and this share must not be handed in.
-5. **Check the x-coordinate.** If it is 0: `MalformedShare`.
-6. **Return** the share in the share format.
+2. **Check the secret key.** If `sk` isn't a valid secret key on the suite's curve: `InvalidArgument`.
+3. **Find the entry.** Derive `pk*` from `sk`, then find the entry with its fingerprint. If there is none: `NotARecipient`.
+4. **Unwrap.** Unwrap `wrapped_i` with `sk` and `wrapAD_i`. If that fails: `ShareDecryptionFailed`. The share isn't for `sk`, or the entry was altered or copied from another envelope.
+5. **Check the commitment.** If the share doesn't match `commitment_i`: `CommitmentMismatch`. The envelope was built wrong, and this share must not be handed in.
+6. **Check the x-coordinate.** If it is 0: `MalformedShare`.
+7. **Return** the share in the share format.
+
+On every path, zero the unwrapped share's copies that aren't returned.
 
 ### combine(envelope, shares, aad)
 
+A share's position `p` is its place in the `shares` argument. Each step checks every share before the next step starts. Each share error lists every failing position, in order.
+
 1. **Parse** the envelope.
-2. **Check each share's format.** For each share, at its position `p`:
-   - it is 51 bytes, its version is `0x01`, its index is below N and its x-coordinate isn't 0; otherwise `MalformedShare`;
-   - its envelope id matches this envelope's; otherwise `WrongEnvelope`.
+2. **Check the shape.** Each share must be 51 bytes with version `0x01`. Otherwise: `MalformedShare`.
+3. **Check the envelope id.** Each share's id must match this envelope's. Otherwise: `WrongEnvelope`.
+4. **Check the index and x-coordinate.** Each share's index must be below N, and its x-coordinate must not be 0. Otherwise: `MalformedShare`.
+5. **Check the commitments.** Each share must match `commitment_i` for the index `i` it names. Otherwise: `CommitmentMismatch`.
+6. **Check for duplicates.** No two shares may name the same index. Otherwise: `DuplicateShare`, listing the positions that repeat an earlier one.
+7. **Count.** There must be at least K shares. Otherwise: `NotEnoughShares`.
+8. **Check the x-coordinates.** No two shares may share an x-coordinate. Otherwise: `InconsistentShares`.
+9. **Interpolate.** Find `dk` from the first K shares, in position order.
+10. **Check the key.** Compare `keyCheck(dk)` with the stored key check, in constant time. If they differ: `InconsistentShares`.
+11. **Check the remaining shares.** Every share after the first K must lie on the same polynomials. Otherwise: `InconsistentShares`.
+12. **Decrypt the content** with `contentKey` and `AD = header ‖ aad`. If that fails: `DecryptionFailed`, because the `aad` is wrong or the envelope was altered.
+13. **Return** the plaintext.
 
-   Each error lists every failing position.
-3. **Check the indexes.** If two shares have the same index: `DuplicateShare`.
-4. **Count.** If there are fewer than K shares: `NotEnoughShares`.
-5. **Check the commitments.** If any share doesn't match the commitment of the entry it names: `CommitmentMismatch`, listing every failing position.
-6. **Check the x-coordinates.** If two shares have the same x-coordinate: `InconsistentShares`. All the commitments matched, so only the envelope's creator can cause this.
-7. **Interpolate** `dk` from every supplied share.
-8. **Check the key.** Compare `keyCheck(dk)` with the stored key check in constant time. If they differ: `InconsistentShares`.
-9. **Decrypt the content** with `contentKey` and `AD = header ‖ aad`. If decryption fails: `DecryptionFailed`. The `aad` is wrong, or the envelope was altered.
-10. **Zero** `dk`, `contentKey` and the share copies, as far as the platform allows. Return the plaintext.
+On every path, success or failure, zero `dk`, `contentKey` and the share copies, as far as the platform allows. A wrong `aad` fails at step 12 with the real keys in memory.
 
-`combine` fails as a whole when any share fails. It doesn't open the envelope with the rest.
+**Who causes each failure:**
+- Steps 8, 10 and 11 can't come from holders: every share already matched its commitment. Only the envelope's creator can cause them.
+- Step 5 comes before step 6 so that a forged share claiming an honest holder's index is reported as `CommitmentMismatch` at its own position, not as a duplicate of the honest share.
 
-To find out who handed in a bad share, the caller drops the named shares and calls `combine` again with others. If the content then opens, the header is as its creator made it. An honest holder's share passed this same commitment at step 4 of `decryptShare`, so the dropped share isn't what its holder's `decryptShare` returned: the holder is dishonest, or the share was altered on its way.
+**Strict by design:** `combine` fails as a whole when any share fails. It doesn't open the envelope with the rest.
+
+**Finding who handed in a bad share:** when the error is `CommitmentMismatch` or `MalformedShare`, the caller can drop the named shares and call `combine` again with others.
+- If the content then opens, the header is as its creator made it.
+- An honest holder's share passed this same commitment at step 5 of `decryptShare`, since the envelope id ties it to this prelude. So the dropped share isn't what its holder's `decryptShare` returned: the holder is dishonest, or the share was altered on its way.
+- `WrongEnvelope` says nothing of the sort. An honest holder may simply have unwrapped a different envelope.
 
 ## Security considerations
 
 - **The combiner** learns the data key and the plaintext.
 - **Fewer than K shares:** Shamir alone reveals nothing about the data key. The header adds the fingerprints, the commitments and the key check. With K − 1 shares, finding the data key still takes about 2^256 guesses, each checked against the key check.
 - **A dishonest encryptor:**
-  - **Can't:** make different K-subsets open different plaintexts (the key check), or hand a holder a share that doesn't match its commitment without that holder's `decryptShare` failing.
+  - **Can't:**
+    - make different K-subsets open different plaintexts (the key check);
+    - make an envelope that opens with more than K shares while its K-subsets fail (the degree check in `combine`);
+    - hand a holder a share that doesn't match its commitment without that holder's `decryptShare` failing.
   - **Can:** make an envelope that some or all K-subsets fail to open (`InconsistentShares`). Nothing authenticates the encryptor (see below).
+- **What a holder releases:** a share opens the envelopes its envelope id names.
+  - Copying an entry into a decoy envelope fails at unwrapping, because the wrapped share is bound to its prelude.
+  - An encryptor who reuses a data key and shares across envelopes can still make one share fit several of them. Nothing in the format can stop that, since the encryptor already knows the data key.
 - **Attribution:** a bad share is reported by its position in `combine`'s input, not by the index it names. Any holder can claim any index, and the caller knows who handed in each position.
+- **Recipient keys:** `encrypt` rejects invalid, non-canonical and small-order keys, so a substituted key such as the ed25519 identity point can't make a share public. Whether each key really belongs to its recipient is the caller's to establish.
 - **Recipient privacy:** anyone who has a candidate public key can compute its fingerprint and test whether it is a recipient.
 - **No sender authentication:** anyone with the recipients' public keys can create a valid envelope.
 - **No revocation:** re-encrypting to a new set of recipients doesn't affect copies of old envelopes.
@@ -252,6 +320,6 @@ To find out who handed in a bad share, the caller drops the named shares and cal
 The implementation adds two kinds of vectors under `vectors/`:
 
 - known-answer vectors: secret keys, an envelope and `aad`, giving each holder's share and the plaintext;
-- byte-exact vectors that build an envelope from a fixed data key, shares, wrapped entries and nonce.
+- byte-exact vectors that build an envelope from a fixed data key, shares, wrapped shares and nonce.
 
 Implementations in other languages check themselves against both.
