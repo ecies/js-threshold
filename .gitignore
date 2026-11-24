@@ -1,0 +1,13 @@
+node_modules/
+coverage/
+dist/
+.vite/
+
+.DS_Store
+
+# example
+bun.lockb
+deno.lock
+
+# browser tests
+tests-browser/**/*.test.ts

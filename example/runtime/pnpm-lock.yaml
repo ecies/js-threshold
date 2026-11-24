@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@ecies/threshold':
+        specifier: file:../..
+        version: file:../..
+
+packages:
+
+  '@ecies/threshold@file:../..':
+    resolution: {directory: ../.., type: directory}
+    engines: {bun: '>=1', deno: '>=2.7.10', node: '>=16'}
+
+snapshots:
+
+  '@ecies/threshold@file:../..': {}
