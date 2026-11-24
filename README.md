@@ -8,7 +8,7 @@ This is threshold access control, not threshold decryption: the data key is reas
 
 ## Status
 
-Under development and not yet published. The design is tracked in [#1](https://github.com/ecies/js-threshold/issues/1), and `SPEC.md` will specify the envelope format.
+Under development and not yet published. The design is tracked in [#1](https://github.com/ecies/js-threshold/issues/1), and [SPEC.md](./SPEC.md) specifies the envelope format.
 
 ## License
 
