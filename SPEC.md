@@ -71,13 +71,16 @@ The suite byte fixes the curve, the ECIES options and the cipher. One cipher bot
 
 ## Keys and fingerprints
 
-A recipient public key must be valid on the suite's curve, or `encrypt` fails with `InvalidArgument`:
+A public key is valid on the suite's curve when it meets the rules below. `encrypt` checks each recipient key, and fails with `InvalidArgument` on an invalid one. `decryptShare` checks the ephemeral key in the wrapped share (see [Unwrapping](#wrapped-shares)).
 
 - **secp256k1:** a SEC1 point, compressed (33 bytes) or uncompressed (65 bytes), on the curve.
 - **x25519:** 32 bytes holding a canonical u-coordinate, below 2^255 − 19 (so bit 255 is clear), and not of small order: its X25519 shared secret must not be all zeros (RFC 7748, section 6.1).
+  - X25519 clamps every scalar to a multiple of 8, so a small-order point gives all zeros whatever the secret key. Any key can test it, so `encrypt` can check a recipient key before it draws `e`.
 - **ed25519:** 32 bytes holding a canonical RFC 8032 encoding (y below 2^255 − 19). The point must lie on the curve and in the prime-order subgroup, and must not be of small order.
   - The identity point passes the subgroup check, so the small-order check is what rejects it.
   - Without these checks, the identity point as a recipient key gives a shared point anyone can compute, and so a share anyone can unwrap.
+- **Byte order:** x25519's u and ed25519's y are little-endian (RFC 7748, RFC 8032). secp256k1 coordinates and secret keys are big-endian (SEC1).
+  - An X25519 implementation may mask bit 255 of u, or reduce u modulo 2^255 − 19, instead of rejecting a non-canonical value. `@noble/curves` 1.9's does both. So an implementation checks that u is canonical itself.
 
 A secret key must be 32 bytes. On secp256k1 it must also lie strictly between 0 and the group order. Otherwise `decryptShare` fails with `InvalidArgument`.
 
@@ -170,7 +173,13 @@ The point encodings depend on the curve:
   - `Z = [s]·pk` is a 32-byte Edwards point encoding. `s` is e's RFC 8032 secret scalar: SHA-512 of `e`, clamped, then reduced modulo the group order.
   - This is not a conversion to X25519.
 
-**Unwrapping:** the recipient reads `E`, re-encodes it as `S`, computes `Z` with its own secret key (`sk·E`, `X25519(sk, E)` or `[s]·E`), derives `k` and decrypts with the same `wrapAD_i`.
+**Unwrapping:** the recipient reads `E` and checks it, re-encodes it as `S`, computes `Z` with its own secret key (`sk·E`, `X25519(sk, E)` or `[s]·E`), derives `k` and decrypts with the same `wrapAD_i`.
+
+- **The check:** `E` must be a valid public key on the suite's curve (see [Keys and fingerprints](#keys-and-fingerprints)). On secp256k1 it must also be in the suite's "Ephemeral key" form: `0x04` and 64 bytes, or `0x02` or `0x03` and 32 bytes. An honest encryptor's `E` always passes.
+- **Why, on ed25519:** eciesjs 0.5 checks only that `E` decodes to a point on the curve.
+  - **The identity point** as `E` gives the identity as `Z` whatever the secret key, so anyone can unwrap that share. Its holder's `decryptShare` still succeeds and shows nothing wrong.
+  - **A point outside the prime-order subgroup,** `[r]·B + T` with `T` of order 8, makes `Z` depend on how `s` was reduced. Reduced modulo the group order, as above, `s mod 8` depends on ⌊clamped / group order⌋, which is 3 to 7. So whether unwrapping succeeds reveals about 2 bits of the holder's secret scalar to anyone who can send them envelopes and see which open. An implementation that multiplies by the clamped scalar unreduced gets a different `Z` instead.
+  - In the prime-order subgroup, both scalars give the same `Z`, and it reveals nothing.
 
 **Compatibility:** with empty associated data, this is exactly eciesjs 0.5's `encrypt`. Its [DETAILS.md](https://github.com/ecies/js/blob/master/DETAILS.md) predates the sender point and doesn't cover x25519 or ed25519, so the steps above are the reference.
 
@@ -202,13 +211,14 @@ content               = nonce ‖ tag ‖ ciphertext
 ```text
 offset  size  field
 0       1     version = 0x01
-1       16    envelope id = SHA-256("ecies-threshold/v1/envelope-id" ‖ prelude)[0..16]
-17      1     recipient index i, below N
-18      33    share_i
+1       32    envelope id = SHA-256("ecies-threshold/v1/envelope-id" ‖ prelude)
+33      1     recipient index i, below N
+34      33    share_i
 ```
 
-- **Size:** 51 bytes.
+- **Size:** 67 bytes.
 - **Envelope id:** a share from another envelope is reported as such, instead of failing its commitment and blaming its holder.
+- **Why the full hash:** the envelope's creator chooses both preludes, so a shorter id falls to a birthday search. With a 16-byte id, about 2^64 work would give two envelopes one id. A holder's share of the first would then fail the second's commitment and be blamed on them. The full hash takes about 2^128.
 - **What the id names:** the id covers the prelude, the same bytes the wrapped share is bound to. Any envelope with that prelude has the same data key and shares, so a holder approving a release should approve this id. The exception is an encryptor reusing a data key across envelopes (see [Security considerations](#security-considerations)).
 - **Not an authenticator:** the id is public, so anyone can rewrite it. It labels a share; it doesn't prove where the share came from.
 - **Secrecy:** a share is a secret, since K of them open the envelope. Send it over a confidential channel, for example ECIES-encrypted to the combiner's key.
@@ -247,7 +257,7 @@ Both `decryptShare` and `combine` start here. Each check runs in order, before a
 1. **Parse** the envelope.
 2. **Check the secret key.** If `sk` isn't a valid secret key on the suite's curve: `InvalidArgument`.
 3. **Find the entry.** Derive `pk*` from `sk`, then find the entry with its fingerprint. If there is none: `NotARecipient`.
-4. **Unwrap.** Unwrap `wrapped_i` with `sk` and `wrapAD_i`. If that fails: `ShareDecryptionFailed`. The share isn't for `sk`, or the entry was altered or copied from another envelope.
+4. **Unwrap.** Check `E`, then unwrap `wrapped_i` with `sk` and `wrapAD_i` (see [Unwrapping](#wrapped-shares)). If `E` is invalid or decryption fails: `ShareDecryptionFailed`. The share isn't for `sk`, or the entry was altered, crafted or copied from another envelope.
 5. **Check the commitment.** If the share doesn't match `commitment_i`: `CommitmentMismatch`. The envelope was built wrong, and this share must not be handed in.
 6. **Check the x-coordinate.** If it is 0: `MalformedShare`.
 7. **Return** the share in the share format.
@@ -256,10 +266,12 @@ On every path, zero the unwrapped share's copies that aren't returned.
 
 ### combine(envelope, shares, aad)
 
+`aad` defaults to empty.
+
 A share's position `p` is its place in the `shares` argument. Each step checks every share before the next step starts. Each share error lists every failing position, in order.
 
 1. **Parse** the envelope.
-2. **Check the shape.** Each share must be 51 bytes with version `0x01`. Otherwise: `MalformedShare`.
+2. **Check the shape.** Each share must be 67 bytes with version `0x01`. Otherwise: `MalformedShare`.
 3. **Check the envelope id.** Each share's id must match this envelope's. Otherwise: `WrongEnvelope`.
 4. **Check the index and x-coordinate.** Each share's index must be below N, and its x-coordinate must not be 0. Otherwise: `MalformedShare`.
 5. **Check the commitments.** Each share must match `commitment_i` for the index `i` it names. Otherwise: `CommitmentMismatch`.
@@ -299,7 +311,10 @@ On every path, success or failure, zero `dk`, `contentKey` and the share copies,
   - Copying an entry into a decoy envelope fails at unwrapping, because the wrapped share is bound to its prelude.
   - An encryptor who reuses a data key and shares across envelopes can still make one share fit several of them. Nothing in the format can stop that, since the encryptor already knows the data key.
 - **Attribution:** a bad share is reported by its position in `combine`'s input, not by the index it names. Any holder can claim any index, and the caller knows who handed in each position.
-- **Recipient keys:** `encrypt` rejects invalid, non-canonical and small-order keys, so a substituted key such as the ed25519 identity point can't make a share public. Whether each key really belongs to its recipient is the caller's to establish.
+- **Public keys:**
+  - `encrypt` rejects invalid, non-canonical and small-order recipient keys, so a substituted key such as the ed25519 identity point can't make a share public.
+  - `decryptShare` applies the same rules to the ephemeral key in a wrapped share. So anyone who can send a holder envelopes can't use one to probe the holder's ed25519 secret scalar. An encryptor also can't publish a share inside the envelope while its holder's `decryptShare` succeeds, though a dishonest one knows every share and can leak them by other means.
+  - Whether each recipient key really belongs to its recipient is the caller's to establish.
 - **Recipient privacy:** anyone who has a candidate public key can compute its fingerprint and test whether it is a recipient.
 - **No sender authentication:** anyone with the recipients' public keys can create a valid envelope.
 - **No revocation:** re-encrypting to a new set of recipients doesn't affect copies of old envelopes.
