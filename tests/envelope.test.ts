@@ -2,30 +2,54 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 
 import { encodePrelude, parseEnvelope } from "../src/envelope";
-import { ThresholdError } from "../src/errors";
+import { type ErrorCode, ThresholdError } from "../src/errors";
 import { getSuite } from "../src/suites";
 
-// SPEC.md's suite table: ID, nonce length Ln, wrapped share size W
-const SPEC_SUITES = [
-  [0x01, 16, 130],
-  [0x02, 12, 126],
-  [0x03, 24, 138],
-  [0x04, 16, 98],
-  [0x05, 12, 94],
-  [0x06, 24, 106],
-  [0x07, 16, 130],
-  [0x08, 12, 126],
-  [0x09, 24, 138],
-  [0x0a, 16, 98],
-  [0x0b, 12, 94],
-  [0x0c, 24, 106],
-  [0x11, 16, 97],
-  [0x12, 12, 93],
-  [0x13, 24, 105],
-  [0x21, 16, 97],
-  [0x22, 12, 93],
-  [0x23, 24, 105],
+const U = "uncompressed";
+const C = "compressed";
+const AES = "AES-256-GCM";
+const XCHACHA20 = "XChaCha20-Poly1305";
+
+// SPEC.md's suite table, column for column: ID, curve, ephemeral key, HKDF input, cipher,
+// nonce length Ln, wrapped share size W
+const SPEC_TABLE = [
+  [0x01, "secp256k1", U, U, AES, 16, 130],
+  [0x02, "secp256k1", U, U, AES, 12, 126],
+  [0x03, "secp256k1", U, U, XCHACHA20, 24, 138],
+  [0x04, "secp256k1", C, U, AES, 16, 98],
+  [0x05, "secp256k1", C, U, AES, 12, 94],
+  [0x06, "secp256k1", C, U, XCHACHA20, 24, 106],
+  [0x07, "secp256k1", U, C, AES, 16, 130],
+  [0x08, "secp256k1", U, C, AES, 12, 126],
+  [0x09, "secp256k1", U, C, XCHACHA20, 24, 138],
+  [0x0a, "secp256k1", C, C, AES, 16, 98],
+  [0x0b, "secp256k1", C, C, AES, 12, 94],
+  [0x0c, "secp256k1", C, C, XCHACHA20, 24, 106],
+  [0x11, "x25519", "", "", AES, 16, 97],
+  [0x12, "x25519", "", "", AES, 12, 93],
+  [0x13, "x25519", "", "", XCHACHA20, 24, 105],
+  [0x21, "ed25519", "", "", AES, 16, 97],
+  [0x22, "ed25519", "", "", AES, 12, 93],
+  [0x23, "ed25519", "", "", XCHACHA20, 24, 105],
 ] as const;
+
+const SPEC_SUITES = SPEC_TABLE.map(
+  ([id, curve, ephemeralKey, hkdfInput, cipher, ln, w]) => ({
+    id,
+    ln,
+    w,
+    // the same row in eciesjs's Config terms, as a Suite holds it
+    row: {
+      id,
+      ellipticCurve: curve,
+      isEphemeralKeyCompressed: ephemeralKey === C,
+      isHkdfKeyCompressed: hkdfInput === C,
+      symmetricAlgorithm: cipher === AES ? "aes-256-gcm" : "xchacha20",
+      nonceLength: ln,
+      wrappedLength: w,
+    },
+  })
+);
 
 interface Shape {
   suite: number;
@@ -33,7 +57,7 @@ interface Shape {
   w: number;
   k: number;
   n: number;
-  ciphertext: number;
+  ciphertextLength: number;
 }
 
 const hex = (byte: number) => `0x${byte.toString(16).padStart(2, "0")}`;
@@ -52,13 +76,13 @@ const concat = (...parts: Uint8Array[]) => {
 
 // lays an envelope out by hand from SPEC.md's offsets, each field filled with its own byte
 // so that a misread offset shows
-function layOut({ suite, ln, w, k, n, ciphertext }: Shape) {
+function layOut({ suite, ln, w, k, n, ciphertextLength }: Shape) {
   const fields = {
     keyCheck: fill(32, 0x4c),
     fingerprints: Array.from({ length: n }, (_, i) => fill(32, 0x10 + i)),
     commitments: Array.from({ length: n }, (_, i) => fill(32, 0x50 + i)),
     wrapped: Array.from({ length: n }, (_, i) => fill(w, 0x90 + i)),
-    content: concat(fill(ln, 0xd0), fill(16, 0xd1), fill(ciphertext, 0xd2)),
+    content: concat(fill(ln, 0xd0), fill(16, 0xd1), fill(ciphertextLength, 0xd2)),
   };
   const table = fields.fingerprints.flatMap((f, i) => [f, fields.commitments[i]]);
   const prelude = concat(Uint8Array.of(0x01, suite, k, n), fields.keyCheck, ...table);
@@ -66,7 +90,7 @@ function layOut({ suite, ln, w, k, n, ciphertext }: Shape) {
   return { fields, prelude, header, envelope: concat(header, fields.content) };
 }
 
-const DEFAULT: Shape = { suite: 0x01, ln: 16, w: 130, k: 2, n: 3, ciphertext: 5 };
+const DEFAULT: Shape = { suite: 0x01, ln: 16, w: 130, k: 2, n: 3, ciphertextLength: 5 };
 
 function suiteOf(id: number) {
   const suite = getSuite(id);
@@ -77,7 +101,7 @@ function suiteOf(id: number) {
 }
 
 // the code of the ThresholdError f throws, or undefined if it returns
-function codeOf(f: () => unknown): string | undefined {
+function codeOf(f: () => unknown): ErrorCode | undefined {
   try {
     f();
   } catch (e) {
@@ -108,7 +132,7 @@ describe("parseEnvelope", () => {
   });
 
   it("rejects every suite the table doesn't list as UnsupportedSuite", () => {
-    const listed = new Set<number>(SPEC_SUITES.map(([id]) => id));
+    const listed = new Set<number>(SPEC_SUITES.map(({ id }) => id));
     const unlisted = Array.from({ length: 256 }, (_, id) => id).filter(
       (id) => !listed.has(id)
     );
@@ -136,11 +160,11 @@ describe("parseEnvelope", () => {
     }
   });
 
-  for (const [suite, ln, w] of SPEC_SUITES) {
+  for (const { id: suite, ln, w } of SPEC_SUITES) {
     it(`rejects suite ${hex(suite)} cut short of its header, nonce and tag, at every length`, () => {
       const { envelope } = layOut({ ...DEFAULT, suite, ln, w });
       const minimum = 36 + 3 * (64 + w) + ln + 16;
-      expect(envelope.length).toBe(minimum + DEFAULT.ciphertext);
+      expect(envelope.length).toBe(minimum + DEFAULT.ciphertextLength);
       for (let length = 0; length <= envelope.length; length++) {
         expect(codeOf(() => parseEnvelope(envelope.subarray(0, length)))).toBe(
           length < minimum ? "MalformedEnvelope" : undefined
@@ -149,11 +173,11 @@ describe("parseEnvelope", () => {
     });
   }
 
-  it("reads each field at its offset, in every suite", () => {
-    for (const [suite, ln, w] of SPEC_SUITES) {
+  it("reads the suite's row from SPEC.md's table, and each field at its offset", () => {
+    for (const { id: suite, ln, w, row } of SPEC_SUITES) {
       const { fields, prelude, header, envelope } = layOut({ ...DEFAULT, suite, ln, w });
       const parsed = parseEnvelope(envelope);
-      expect(parsed.suite.id).toBe(suite);
+      expect(parsed.suite).toEqual(row);
       expect(parsed.threshold).toBe(2);
       expect(parsed.keyCheck).toEqual(fields.keyCheck);
       expect(parsed.recipients).toEqual(
@@ -212,7 +236,7 @@ describe("parseEnvelope", () => {
   });
 
   it("runs its checks in SPEC.md's order", () => {
-    const cases: [string, number[], string][] = [
+    const cases: [string, number[], ErrorCode][] = [
       ["length, then version", [0x02, 0x01, 2], "MalformedEnvelope"],
       ["version, then suite", [0x02, 0x00, 2, 3], "UnsupportedVersion"],
       ["version, then length again", [0x02, 0x01, 2, 3], "UnsupportedVersion"],
@@ -263,13 +287,13 @@ describe("parseEnvelope", () => {
 
 describe("encodePrelude", () => {
   it("writes SPEC.md's prelude, which parseEnvelope reads back", () => {
-    for (const [suite, ln, w] of SPEC_SUITES) {
+    for (const { id: suite, ln, w } of SPEC_SUITES) {
       for (const [k, n] of [
         [2, 2],
         [3, 5],
         [255, 255],
       ]) {
-        const { fields, prelude } = layOut({ suite, ln, w, k, n, ciphertext: 0 });
+        const { fields, prelude } = layOut({ suite, ln, w, k, n, ciphertextLength: 0 });
         const written = encodePrelude({
           suite: suiteOf(suite),
           threshold: k,

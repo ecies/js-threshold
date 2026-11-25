@@ -4,10 +4,10 @@ import { getSuite, type Suite } from "./suites";
 
 const ENVELOPE_VERSION = 0x01;
 // version, suite, K and N
-const FIXED_FIELDS = 4;
+const FIXED_FIELDS_LENGTH = 4;
 const KEY_CHECK_LENGTH = 32;
 // the recipient table starts after the key check, at 36
-const TABLE_OFFSET = FIXED_FIELDS + KEY_CHECK_LENGTH;
+const TABLE_OFFSET = FIXED_FIELDS_LENGTH + KEY_CHECK_LENGTH;
 const DIGEST_LENGTH = 32;
 // a recipient table entry: the fingerprint, then the commitment
 const ENTRY_LENGTH = 2 * DIGEST_LENGTH;
@@ -51,18 +51,18 @@ export function encodePrelude(fields: PreludeFields): Uint8Array {
   const n = fields.recipients.length;
   const prelude = new Uint8Array(TABLE_OFFSET + n * ENTRY_LENGTH);
   prelude.set([ENVELOPE_VERSION, fields.suite.id, fields.threshold, n]);
-  prelude.set(fields.keyCheck, FIXED_FIELDS);
+  prelude.set(fields.keyCheck, FIXED_FIELDS_LENGTH);
   fields.recipients.forEach(({ fingerprint, commitment }, i) => {
-    const entry = TABLE_OFFSET + i * ENTRY_LENGTH;
-    prelude.set(fingerprint, entry);
-    prelude.set(commitment, entry + DIGEST_LENGTH);
+    const entryOffset = TABLE_OFFSET + i * ENTRY_LENGTH;
+    prelude.set(fingerprint, entryOffset);
+    prelude.set(commitment, entryOffset + DIGEST_LENGTH);
   });
   return prelude;
 }
 
 /** Reads an envelope's fields, running SPEC.md's parse checks in order. */
 export function parseEnvelope(bytes: Uint8Array): Envelope {
-  if (bytes.length < FIXED_FIELDS) {
+  if (bytes.length < FIXED_FIELDS_LENGTH) {
     throw new ThresholdError("MalformedEnvelope", "envelope is shorter than 4 bytes");
   }
   if (bytes[0] !== ENVELOPE_VERSION) {
@@ -89,12 +89,12 @@ export function parseEnvelope(bytes: Uint8Array): Envelope {
 
   const recipients: Recipient[] = [];
   for (let i = 0; i < n; i++) {
-    const entry = TABLE_OFFSET + i * ENTRY_LENGTH;
-    const wrapped = preludeLength + i * w;
+    const entryOffset = TABLE_OFFSET + i * ENTRY_LENGTH;
+    const wrappedOffset = preludeLength + i * w;
     recipients.push({
-      fingerprint: bytes.subarray(entry, entry + DIGEST_LENGTH),
-      commitment: bytes.subarray(entry + DIGEST_LENGTH, entry + ENTRY_LENGTH),
-      wrapped: bytes.subarray(wrapped, wrapped + w),
+      fingerprint: bytes.subarray(entryOffset, entryOffset + DIGEST_LENGTH),
+      commitment: bytes.subarray(entryOffset + DIGEST_LENGTH, entryOffset + ENTRY_LENGTH),
+      wrapped: bytes.subarray(wrappedOffset, wrappedOffset + w),
     });
   }
   if (!allDistinct(recipients.map((r) => r.fingerprint))) {
@@ -107,7 +107,7 @@ export function parseEnvelope(bytes: Uint8Array): Envelope {
   return {
     suite,
     threshold,
-    keyCheck: bytes.subarray(FIXED_FIELDS, TABLE_OFFSET),
+    keyCheck: bytes.subarray(FIXED_FIELDS_LENGTH, TABLE_OFFSET),
     recipients,
     prelude: bytes.subarray(0, preludeLength),
     header: bytes.subarray(0, headerLength),

@@ -1,6 +1,9 @@
 import { SHAMIR_SHARE_LENGTH, TAG_LENGTH } from "./consts";
 
-/** A row of SPEC.md's suite table. The field names follow eciesjs's `Config`. */
+/**
+ * A row of SPEC.md's suite table. The field names follow eciesjs's `Config`, except
+ * `nonceLength`, which also holds XChaCha20-Poly1305's 24 bytes.
+ */
 export interface Suite {
   readonly id: number;
   readonly ellipticCurve: "secp256k1" | "x25519" | "ed25519";
@@ -15,52 +18,79 @@ export interface Suite {
   readonly wrappedLength: number;
 }
 
-type Cipher = readonly [Suite["symmetricAlgorithm"], number];
+type Cipher = Pick<Suite, "symmetricAlgorithm" | "nonceLength">;
+type Point = "compressed" | "uncompressed";
 
-const AES_16: Cipher = ["aes-256-gcm", 16];
-const AES_12: Cipher = ["aes-256-gcm", 12];
-const XCHACHA: Cipher = ["xchacha20", 24];
+const AES_16: Cipher = { symmetricAlgorithm: "aes-256-gcm", nonceLength: 16 };
+const AES_12: Cipher = { symmetricAlgorithm: "aes-256-gcm", nonceLength: 12 };
+const XCHACHA20: Cipher = { symmetricAlgorithm: "xchacha20", nonceLength: 24 };
 
-function row(
+const CURVE25519_PUBLIC_KEY_LENGTH = 32;
+const COMPRESSED_PUBLIC_KEY_LENGTH = 33;
+const UNCOMPRESSED_PUBLIC_KEY_LENGTH = 65;
+
+function wrappedLength(ephemeralKeyLength: number, { nonceLength }: Cipher): number {
+  return ephemeralKeyLength + nonceLength + TAG_LENGTH + SHAMIR_SHARE_LENGTH;
+}
+
+// the columns follow SPEC.md's table: ephemeral key, HKDF input, then cipher and nonce
+function secp256k1(
   id: number,
-  ellipticCurve: Suite["ellipticCurve"],
-  isEphemeralKeyCompressed: boolean,
-  isHkdfKeyCompressed: boolean,
-  [symmetricAlgorithm, nonceLength]: Cipher
+  ephemeralKey: Point,
+  hkdfInput: Point,
+  cipher: Cipher
 ): Suite {
-  const ephemeralKey =
-    ellipticCurve !== "secp256k1" ? 32 : isEphemeralKeyCompressed ? 33 : 65;
+  const isEphemeralKeyCompressed = ephemeralKey === "compressed";
+  return {
+    id,
+    ellipticCurve: "secp256k1",
+    isEphemeralKeyCompressed,
+    isHkdfKeyCompressed: hkdfInput === "compressed",
+    ...cipher,
+    wrappedLength: wrappedLength(
+      isEphemeralKeyCompressed
+        ? COMPRESSED_PUBLIC_KEY_LENGTH
+        : UNCOMPRESSED_PUBLIC_KEY_LENGTH,
+      cipher
+    ),
+  };
+}
+
+function curve25519(
+  id: number,
+  ellipticCurve: "x25519" | "ed25519",
+  cipher: Cipher
+): Suite {
   return {
     id,
     ellipticCurve,
-    isEphemeralKeyCompressed,
-    isHkdfKeyCompressed,
-    symmetricAlgorithm,
-    nonceLength,
-    wrappedLength: ephemeralKey + nonceLength + TAG_LENGTH + SHAMIR_SHARE_LENGTH,
+    isEphemeralKeyCompressed: false,
+    isHkdfKeyCompressed: false,
+    ...cipher,
+    wrappedLength: wrappedLength(CURVE25519_PUBLIC_KEY_LENGTH, cipher),
   };
 }
 
 const SUITES = new Map(
   [
-    row(0x01, "secp256k1", false, false, AES_16),
-    row(0x02, "secp256k1", false, false, AES_12),
-    row(0x03, "secp256k1", false, false, XCHACHA),
-    row(0x04, "secp256k1", true, false, AES_16),
-    row(0x05, "secp256k1", true, false, AES_12),
-    row(0x06, "secp256k1", true, false, XCHACHA),
-    row(0x07, "secp256k1", false, true, AES_16),
-    row(0x08, "secp256k1", false, true, AES_12),
-    row(0x09, "secp256k1", false, true, XCHACHA),
-    row(0x0a, "secp256k1", true, true, AES_16),
-    row(0x0b, "secp256k1", true, true, AES_12),
-    row(0x0c, "secp256k1", true, true, XCHACHA),
-    row(0x11, "x25519", false, false, AES_16),
-    row(0x12, "x25519", false, false, AES_12),
-    row(0x13, "x25519", false, false, XCHACHA),
-    row(0x21, "ed25519", false, false, AES_16),
-    row(0x22, "ed25519", false, false, AES_12),
-    row(0x23, "ed25519", false, false, XCHACHA),
+    secp256k1(0x01, "uncompressed", "uncompressed", AES_16),
+    secp256k1(0x02, "uncompressed", "uncompressed", AES_12),
+    secp256k1(0x03, "uncompressed", "uncompressed", XCHACHA20),
+    secp256k1(0x04, "compressed", "uncompressed", AES_16),
+    secp256k1(0x05, "compressed", "uncompressed", AES_12),
+    secp256k1(0x06, "compressed", "uncompressed", XCHACHA20),
+    secp256k1(0x07, "uncompressed", "compressed", AES_16),
+    secp256k1(0x08, "uncompressed", "compressed", AES_12),
+    secp256k1(0x09, "uncompressed", "compressed", XCHACHA20),
+    secp256k1(0x0a, "compressed", "compressed", AES_16),
+    secp256k1(0x0b, "compressed", "compressed", AES_12),
+    secp256k1(0x0c, "compressed", "compressed", XCHACHA20),
+    curve25519(0x11, "x25519", AES_16),
+    curve25519(0x12, "x25519", AES_12),
+    curve25519(0x13, "x25519", XCHACHA20),
+    curve25519(0x21, "ed25519", AES_16),
+    curve25519(0x22, "ed25519", AES_12),
+    curve25519(0x23, "ed25519", XCHACHA20),
   ].map((suite) => [suite.id, suite])
 );
 
