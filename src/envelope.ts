@@ -1,3 +1,4 @@
+import { allDistinct } from "./bytes";
 import { TAG_LENGTH } from "./consts";
 import { ThresholdError } from "./errors";
 import { getSuite, type Suite } from "./suites";
@@ -113,17 +114,4 @@ export function parseEnvelope(bytes: Uint8Array): Envelope {
     header: bytes.subarray(0, headerLength),
     content: bytes.subarray(headerLength),
   };
-}
-
-// header fields are public, so this needn't run in constant time
-function allDistinct(values: readonly Uint8Array[]): boolean {
-  const seen = new Set<string>();
-  for (const value of values) {
-    const key = Array.from(value, (b) => b.toString(16).padStart(2, "0")).join("");
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-  }
-  return true;
 }
