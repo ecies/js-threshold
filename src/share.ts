@@ -27,8 +27,9 @@ export function encodeShare(fields: ShareFields): Uint8Array {
 
 /**
  * Reads a share's fields, as views into `bytes`, or returns undefined if it isn't 67 bytes
- * with version 1. Whether the index is below N, and the x-coordinate isn't 0, depends on
- * the envelope, so `combine` checks those.
+ * with version 1. It accepts any index and x-coordinate: `combine` checks the index against
+ * N and the x-coordinate against 0 after the envelope id, as SPEC.md orders them, so that a
+ * share from another envelope reads as `WrongEnvelope`.
  */
 export function decodeShare(bytes: Uint8Array): ShareFields | undefined {
   if (bytes.length !== ENCODED_SHARE_LENGTH || bytes[0] !== SHARE_FORMAT_VERSION) {

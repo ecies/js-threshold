@@ -43,6 +43,21 @@ describe("decodeShare", () => {
     }
   });
 
+  it("accepts any index and x-coordinate, which combine checks after the envelope id", () => {
+    for (const [index, x] of [
+      [0, 0],
+      [255, 0],
+      [255, 1],
+    ]) {
+      const share = Uint8Array.from(LAID_OUT);
+      // SPEC.md's offsets: the index at 33, the share at 34, its x-coordinate last
+      share[33] = index;
+      share[66] = x;
+      const decoded = decodeShare(share);
+      expect([decoded?.index, decoded?.share[32]]).toEqual([index, x]);
+    }
+  });
+
   it("rejects a version other than 1", () => {
     for (const version of [0x00, 0x02, 0xff]) {
       const share = Uint8Array.from(LAID_OUT);

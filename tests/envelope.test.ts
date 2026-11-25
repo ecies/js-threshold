@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { encodePrelude, parseEnvelope } from "../src/envelope";
 import { type ErrorCode, ThresholdError } from "../src/errors";
-import { getSuite } from "../src/suites";
+import type { Suite } from "../src/suites";
 
 const U = "uncompressed";
 const C = "compressed";
@@ -33,28 +33,21 @@ const SPEC_TABLE = [
   [0x23, "ed25519", "", "", XCHACHA20, 24, 105],
 ] as const;
 
+// the same rows in eciesjs's Config terms, as a Suite holds them
 const SPEC_SUITES = SPEC_TABLE.map(
-  ([id, curve, ephemeralKey, hkdfInput, cipher, ln, w]) => ({
+  ([id, curve, ephemeralKey, hkdfInput, cipher, nonceLength, wrappedLength]): Suite => ({
     id,
-    ln,
-    w,
-    // the same row in eciesjs's Config terms, as a Suite holds it
-    row: {
-      id,
-      ellipticCurve: curve,
-      isEphemeralKeyCompressed: ephemeralKey === C,
-      isHkdfKeyCompressed: hkdfInput === C,
-      symmetricAlgorithm: cipher === AES ? "aes-256-gcm" : "xchacha20",
-      nonceLength: ln,
-      wrappedLength: w,
-    },
+    ellipticCurve: curve,
+    isEphemeralKeyCompressed: ephemeralKey === C,
+    isHkdfKeyCompressed: hkdfInput === C,
+    symmetricAlgorithm: cipher === AES ? "aes-256-gcm" : "xchacha20",
+    nonceLength,
+    wrappedLength,
   })
 );
 
 interface Shape {
-  suite: number;
-  ln: number;
-  w: number;
+  suite: Suite;
   k: number;
   n: number;
   ciphertextLength: number;
@@ -76,29 +69,26 @@ const concat = (...parts: Uint8Array[]) => {
 
 // lays an envelope out by hand from SPEC.md's offsets, each field filled with its own byte
 // so that a misread offset shows
-function layOut({ suite, ln, w, k, n, ciphertextLength }: Shape) {
+function layOut({ suite, k, n, ciphertextLength }: Shape) {
+  const { id, nonceLength, wrappedLength } = suite;
   const fields = {
     keyCheck: fill(32, 0x4c),
     fingerprints: Array.from({ length: n }, (_, i) => fill(32, 0x10 + i)),
     commitments: Array.from({ length: n }, (_, i) => fill(32, 0x50 + i)),
-    wrapped: Array.from({ length: n }, (_, i) => fill(w, 0x90 + i)),
-    content: concat(fill(ln, 0xd0), fill(16, 0xd1), fill(ciphertextLength, 0xd2)),
+    wrapped: Array.from({ length: n }, (_, i) => fill(wrappedLength, 0x90 + i)),
+    content: concat(
+      fill(nonceLength, 0xd0),
+      fill(16, 0xd1),
+      fill(ciphertextLength, 0xd2)
+    ),
   };
   const table = fields.fingerprints.flatMap((f, i) => [f, fields.commitments[i]]);
-  const prelude = concat(Uint8Array.of(0x01, suite, k, n), fields.keyCheck, ...table);
+  const prelude = concat(Uint8Array.of(0x01, id, k, n), fields.keyCheck, ...table);
   const header = concat(prelude, ...fields.wrapped);
   return { fields, prelude, header, envelope: concat(header, fields.content) };
 }
 
-const DEFAULT: Shape = { suite: 0x01, ln: 16, w: 130, k: 2, n: 3, ciphertextLength: 5 };
-
-function suiteOf(id: number) {
-  const suite = getSuite(id);
-  if (suite === undefined) {
-    throw new Error(`suite ${hex(id)} isn't listed`);
-  }
-  return suite;
-}
+const DEFAULT: Shape = { suite: SPEC_SUITES[0], k: 2, n: 3, ciphertextLength: 5 };
 
 // the code of the ThresholdError f throws, or undefined if it returns
 function codeOf(f: () => unknown): ErrorCode | undefined {
@@ -160,10 +150,10 @@ describe("parseEnvelope", () => {
     }
   });
 
-  for (const { id: suite, ln, w } of SPEC_SUITES) {
-    it(`rejects suite ${hex(suite)} cut short of its header, nonce and tag, at every length`, () => {
-      const { envelope } = layOut({ ...DEFAULT, suite, ln, w });
-      const minimum = 36 + 3 * (64 + w) + ln + 16;
+  for (const suite of SPEC_SUITES) {
+    it(`rejects suite ${hex(suite.id)} cut short of its header, nonce and tag, at every length`, () => {
+      const { envelope } = layOut({ ...DEFAULT, suite });
+      const minimum = 36 + 3 * (64 + suite.wrappedLength) + suite.nonceLength + 16;
       expect(envelope.length).toBe(minimum + DEFAULT.ciphertextLength);
       for (let length = 0; length <= envelope.length; length++) {
         expect(codeOf(() => parseEnvelope(envelope.subarray(0, length)))).toBe(
@@ -174,10 +164,10 @@ describe("parseEnvelope", () => {
   }
 
   it("reads the suite's row from SPEC.md's table, and each field at its offset", () => {
-    for (const { id: suite, ln, w, row } of SPEC_SUITES) {
-      const { fields, prelude, header, envelope } = layOut({ ...DEFAULT, suite, ln, w });
+    for (const suite of SPEC_SUITES) {
+      const { fields, prelude, header, envelope } = layOut({ ...DEFAULT, suite });
       const parsed = parseEnvelope(envelope);
-      expect(parsed.suite).toEqual(row);
+      expect(parsed.suite).toEqual(suite);
       expect(parsed.threshold).toBe(2);
       expect(parsed.keyCheck).toEqual(fields.keyCheck);
       expect(parsed.recipients).toEqual(
@@ -287,15 +277,15 @@ describe("parseEnvelope", () => {
 
 describe("encodePrelude", () => {
   it("writes SPEC.md's prelude, which parseEnvelope reads back", () => {
-    for (const { id: suite, ln, w } of SPEC_SUITES) {
+    for (const suite of SPEC_SUITES) {
       for (const [k, n] of [
         [2, 2],
         [3, 5],
         [255, 255],
       ]) {
-        const { fields, prelude } = layOut({ suite, ln, w, k, n, ciphertextLength: 0 });
+        const { fields, prelude } = layOut({ suite, k, n, ciphertextLength: 0 });
         const written = encodePrelude({
-          suite: suiteOf(suite),
+          suite,
           threshold: k,
           keyCheck: fields.keyCheck,
           recipients: fields.fingerprints.map((fingerprint, i) => ({
@@ -306,7 +296,7 @@ describe("encodePrelude", () => {
         expect(written).toEqual(prelude);
 
         const parsed = parseEnvelope(concat(written, ...fields.wrapped, fields.content));
-        expect(parsed.suite).toBe(suiteOf(suite));
+        expect(parsed.suite).toEqual(suite);
         expect(parsed.threshold).toBe(k);
         expect(parsed.recipients.length).toBe(n);
         expect(parsed.prelude).toEqual(written);

@@ -19,7 +19,8 @@ export interface Suite {
 }
 
 type Cipher = Pick<Suite, "symmetricAlgorithm" | "nonceLength">;
-type Point = "compressed" | "uncompressed";
+// how a SEC1 public key is encoded
+type PointEncoding = "compressed" | "uncompressed";
 
 const AES_16: Cipher = { symmetricAlgorithm: "aes-256-gcm", nonceLength: 16 };
 const AES_12: Cipher = { symmetricAlgorithm: "aes-256-gcm", nonceLength: 12 };
@@ -36,8 +37,8 @@ function wrappedLength(ephemeralKeyLength: number, { nonceLength }: Cipher): num
 // the columns follow SPEC.md's table: ephemeral key, HKDF input, then cipher and nonce
 function secp256k1(
   id: number,
-  ephemeralKey: Point,
-  hkdfInput: Point,
+  ephemeralKey: PointEncoding,
+  hkdfInput: PointEncoding,
   cipher: Cipher
 ): Suite {
   const isEphemeralKeyCompressed = ephemeralKey === "compressed";
