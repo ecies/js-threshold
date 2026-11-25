@@ -263,6 +263,15 @@ describe("combine, on an envelope its encryptor built wrong", () => {
     expect(await codeOf(() => combine(envelope, [s2, s0]))).toBe("InconsistentShares");
   });
 
+  it("checks every share after the first K, not just the next one", async () => {
+    const raw = await split(dataKey, 4, 2);
+    raw[3][0] ^= 1;
+    const { envelope, shares } = await builtWith(raw, dataKey);
+
+    expect(await combine(envelope, shares.slice(0, 3))).toEqual(PLAINTEXT);
+    expect(await codeOf(() => combine(envelope, shares))).toBe("InconsistentShares");
+  });
+
   it("rejects shares of degree K, which only all of them would open, as InconsistentShares", async () => {
     // a 3-of-3 split under a 2-of-3 header: no 2 shares give the data key, all 3 do
     const raw = await split(dataKey, 3, 3);
