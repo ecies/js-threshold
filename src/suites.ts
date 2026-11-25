@@ -13,7 +13,7 @@ export interface Suite {
   readonly isHkdfKeyCompressed: boolean;
   readonly symmetricAlgorithm: "aes-256-gcm" | "xchacha20";
   /** Ln: 12 or 16 for AES-256-GCM, 24 for XChaCha20-Poly1305 */
-  readonly nonceLength: number;
+  readonly nonceLength: 12 | 16 | 24;
   /** W: the ephemeral key, the nonce, the tag and the encrypted share */
   readonly wrappedLength: number;
 }
