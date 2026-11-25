@@ -18,7 +18,9 @@ export function fingerprint(canonicalPublicKey: Uint8Array): Uint8Array {
 
 /** A share's commitment, from the 33-byte Shamir share. */
 export function commitment(share: Uint8Array): Uint8Array {
-  return sha256(concatBytes(SHARE, share));
+  // hashed in pieces, since a concatenation would leave a copy of the share; the hash
+  // wipes its own buffer when it finishes
+  return sha256.create().update(SHARE).update(share).digest();
 }
 
 export function envelopeId(prelude: Uint8Array): Uint8Array {

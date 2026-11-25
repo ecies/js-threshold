@@ -1,6 +1,10 @@
-import type { Config } from "eciesjs/config";
+// eciesjs's `Config` type, through the package root: these declarations ship, and a
+// consumer whose TypeScript ignores `exports` can't resolve `eciesjs/config`
+import type { ECIES_CONFIG } from "eciesjs";
 
 import { SHAMIR_SHARE_LENGTH, TAG_LENGTH } from "./consts";
+
+type Config = typeof ECIES_CONFIG;
 
 /**
  * A row of SPEC.md's suite table. The field names follow eciesjs's `Config`, except

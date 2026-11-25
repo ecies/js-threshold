@@ -6,6 +6,7 @@ import { codeOf, thresholdErrorOf } from "./helpers/errors";
 import { keyPairs } from "./helpers/keys";
 import { build, concat } from "./helpers/reference";
 import { SPEC_SUITES } from "./helpers/spec-suites";
+import { SLOW_TEST_TIMEOUT } from "./helpers/timeouts";
 
 const PLAINTEXT = new TextEncoder().encode("secret");
 const SUITE = SPEC_SUITES[0]; // 0x01: secp256k1, AES-256-GCM, W = 130
@@ -136,11 +137,18 @@ describe("combine", () => {
       [[badIndex, other], "WrongEnvelope"], // envelope id before index
       [[garbled(s0), badIndex], "MalformedShare"], // index before commitment
       [[s0, s0, garbled(s1)], "CommitmentMismatch"], // commitment before duplicates
-      [[s0, s0], "DuplicateShare"], // duplicates before the count
     ];
     for (const [input, code] of cases) {
       expect(await codeOf(() => combine(envelope, input))).toBe(code);
     }
+
+    // duplicates before the count: 2 shares of a 3-of-3 envelope are too few as well
+    const threeOfThree = await opened(3, 3);
+    const [t0] = threeOfThree.shares;
+    expect(await positionsOf(() => combine(threeOfThree.envelope, [t0, t0]))).toEqual({
+      code: "DuplicateShare",
+      positions: [1],
+    });
   });
 
   it("rejects the wrong aad as DecryptionFailed", async () => {
@@ -162,41 +170,45 @@ describe("combine", () => {
     expect(await combine(envelope, shares.slice(1), { aad })).toEqual(PLAINTEXT);
   });
 
-  it("rejects a bit flipped anywhere in the envelope", async () => {
-    const { envelope, shares } = await opened();
-    const p = 36 + 64 * 3;
-    // what SPEC.md's parse checks and combine's steps make of each flip
-    const expected = (offset: number, flipped: Uint8Array): ErrorCode => {
-      if (offset === 0) {
-        return "UnsupportedVersion";
-      }
-      if (offset >= p) {
-        return "DecryptionFailed"; // the wrapped shares and the content: the content's AD
-      }
-      const suite = SPEC_SUITES.find((s) => s.id === flipped[1]);
-      if (suite === undefined) {
-        return "UnsupportedSuite";
-      }
-      const [k, n] = [flipped[2], flipped[3]];
-      const headerLength = 36 + n * (64 + suite.wrappedLength);
-      if (k < 2 || k > n || flipped.length < headerLength + suite.nonceLength + 16) {
-        return "MalformedEnvelope";
-      }
-      return "WrongEnvelope"; // the prelude changed, and with it the envelope id
-    };
+  it(
+    "rejects a bit flipped anywhere in the envelope",
+    async () => {
+      const { envelope, shares } = await opened();
+      const p = 36 + 64 * 3;
+      // what SPEC.md's parse checks and combine's steps make of each flip
+      const expected = (offset: number, flipped: Uint8Array): ErrorCode => {
+        if (offset === 0) {
+          return "UnsupportedVersion";
+        }
+        if (offset >= p) {
+          return "DecryptionFailed"; // the wrapped shares and the content: the content's AD
+        }
+        const suite = SPEC_SUITES.find((s) => s.id === flipped[1]);
+        if (suite === undefined) {
+          return "UnsupportedSuite";
+        }
+        const [k, n] = [flipped[2], flipped[3]];
+        const headerLength = 36 + n * (64 + suite.wrappedLength);
+        if (k < 2 || k > n || flipped.length < headerLength + suite.nonceLength + 16) {
+          return "MalformedEnvelope";
+        }
+        return "WrongEnvelope"; // the prelude changed, and with it the envelope id
+      };
 
-    const mismatches = [];
-    for (let offset = 0; offset < envelope.length; offset++) {
-      for (let bit = 0; bit < 8; bit++) {
-        const flipped = withByte(envelope, offset, envelope[offset] ^ (1 << bit));
-        const code = await codeOf(() => combine(flipped, shares.slice(0, 2)));
-        if (code !== expected(offset, flipped)) {
-          mismatches.push({ offset, bit, code });
+      const mismatches = [];
+      for (let offset = 0; offset < envelope.length; offset++) {
+        for (let bit = 0; bit < 8; bit++) {
+          const flipped = withByte(envelope, offset, envelope[offset] ^ (1 << bit));
+          const code = await codeOf(() => combine(flipped, shares.slice(0, 2)));
+          if (code !== expected(offset, flipped)) {
+            mismatches.push({ offset, bit, code });
+          }
         }
       }
-    }
-    expect(mismatches).toEqual([]);
-  });
+      expect(mismatches).toEqual([]);
+    },
+    SLOW_TEST_TIMEOUT
+  );
 });
 
 describe("combine, on an envelope its encryptor built wrong", () => {
@@ -221,6 +233,15 @@ describe("combine, on an envelope its encryptor built wrong", () => {
     expect(await codeOf(() => combine(envelope, [shares[0], shares[1]]))).toBe(
       "InconsistentShares"
     );
+  });
+
+  it("rejects a share after the first K that repeats an x-coordinate as InconsistentShares", async () => {
+    const raw = await split(dataKey, 3, 2);
+    raw[2][32] = raw[0][32];
+    const { envelope, shares } = await builtWith(raw, dataKey);
+
+    expect(await combine(envelope, [shares[0], shares[1]])).toEqual(PLAINTEXT);
+    expect(await codeOf(() => combine(envelope, shares))).toBe("InconsistentShares");
   });
 
   it("rejects shares that don't give the key check's data key as InconsistentShares", async () => {

@@ -14,6 +14,7 @@ import {
   ed25519Scalar,
 } from "./helpers/reference";
 import { configOf, SPEC_SUITES } from "./helpers/spec-suites";
+import { SLOW_TEST_TIMEOUT } from "./helpers/timeouts";
 
 const PLAINTEXT = new TextEncoder().encode("secret");
 const fromHex = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
@@ -116,18 +117,23 @@ describe("decryptShare", () => {
         );
         expect({ offset, code }).toEqual({ offset, code: expected });
       }
-    }
+    },
+    SLOW_TEST_TIMEOUT
   );
 
-  it("ignores the other wrapped shares and the content", async () => {
-    const { holders, envelope } = await envelopeFor(SECP256K1);
-    const sk = holders[0].secretKey;
-    const share = decryptShare(sk, envelope);
-    const p = 36 + 64 * 3;
-    for (let offset = p + SECP256K1.wrappedLength; offset < envelope.length; offset++) {
-      expect(decryptShare(sk, flipped(envelope, offset))).toEqual(share);
-    }
-  });
+  it(
+    "ignores the other wrapped shares and the content",
+    async () => {
+      const { holders, envelope } = await envelopeFor(SECP256K1);
+      const sk = holders[0].secretKey;
+      const share = decryptShare(sk, envelope);
+      const p = 36 + 64 * 3;
+      for (let offset = p + SECP256K1.wrappedLength; offset < envelope.length; offset++) {
+        expect(decryptShare(sk, flipped(envelope, offset))).toEqual(share);
+      }
+    },
+    SLOW_TEST_TIMEOUT
+  );
 
   it("leaves the secret key as it was", async () => {
     const { holders, envelope } = await envelopeFor(SECP256K1);

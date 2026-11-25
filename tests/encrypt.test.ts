@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { decryptShare, encrypt, type SuiteConfig } from "../src";
 import { codeOf } from "./helpers/errors";
 import { type Curve, keyPair, keyPairs } from "./helpers/keys";
+import { SLOW_TEST_TIMEOUT } from "./helpers/timeouts";
 
 const PLAINTEXT = new TextEncoder().encode("secret");
 const fromHex = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
@@ -84,6 +85,7 @@ describe("encrypt rejects with InvalidArgument", () => {
       plusP[i] = Number(v & 0xffn);
       v >>= 8n;
     }
+    const plus9 = fromHex(`f6${"ff".repeat(30)}7f`); // p + 9: bit 255 clear, but not below p
     const smallOrder = [
       "00".repeat(32),
       `01${"00".repeat(31)}`,
@@ -96,6 +98,7 @@ describe("encrypt rejects with InvalidArgument", () => {
       new Uint8Array(33),
       bit255,
       plusP,
+      plus9,
       ...smallOrder,
     ]) {
       expect(await codeOf(() => encryptTo("x25519", bad))).toBe("InvalidArgument");
@@ -145,18 +148,22 @@ describe("encrypt rejects with InvalidArgument", () => {
 });
 
 describe("encrypt accepts", () => {
-  it("255 recipients", async () => {
-    const holders = keyPairs("x25519", 255);
-    const envelope = await encrypt(
-      holders.map((h) => h.publicKey),
-      255,
-      PLAINTEXT,
-      { config: { ellipticCurve: "x25519" } }
-    );
-    expect(envelope[2]).toBe(255);
-    expect(envelope[3]).toBe(255);
-    expect(decryptShare(holders[254].secretKey, envelope)[33]).toBe(254);
-  });
+  it(
+    "255 recipients",
+    async () => {
+      const holders = keyPairs("x25519", 255);
+      const envelope = await encrypt(
+        holders.map((h) => h.publicKey),
+        255,
+        PLAINTEXT,
+        { config: { ellipticCurve: "x25519" } }
+      );
+      expect(envelope[2]).toBe(255);
+      expect(envelope[3]).toBe(255);
+      expect(decryptShare(holders[254].secretKey, envelope)[33]).toBe(254);
+    },
+    SLOW_TEST_TIMEOUT
+  );
 
   it("a secp256k1 key in either SEC1 form, with the same fingerprint", async () => {
     const holders = keyPairs("secp256k1", 2);
