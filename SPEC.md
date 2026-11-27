@@ -262,7 +262,7 @@ Both `decryptShare` and `combine` start here. Each check runs in order, before a
 6. **Check the x-coordinate.** If it is 0: `MalformedShare`.
 7. **Return** the share in the share format.
 
-On every path, zero the unwrapped share's copies that aren't returned.
+On every path, zero the unwrapped share's copies that aren't returned, as far as the platform allows.
 
 ### combine(envelope, shares, aad)
 

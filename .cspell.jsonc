@@ -8,6 +8,7 @@
     "chacha",
     "ecies",
     "eciesjs",
+    "ephemerals",
     "shamir",
     "xchacha20"
   ],

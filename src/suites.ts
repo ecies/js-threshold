@@ -1,4 +1,10 @@
+// eciesjs's `Config` type, through the package root: these declarations ship, and a
+// consumer whose TypeScript ignores `exports` can't resolve `eciesjs/config`
+import type { ECIES_CONFIG } from "eciesjs";
+
 import { SHAMIR_SHARE_LENGTH, TAG_LENGTH } from "./consts";
+
+type Config = typeof ECIES_CONFIG;
 
 /**
  * A row of SPEC.md's suite table. The field names follow eciesjs's `Config`, except
@@ -30,8 +36,24 @@ const CURVE25519_PUBLIC_KEY_LENGTH = 32;
 const COMPRESSED_PUBLIC_KEY_LENGTH = 33;
 const UNCOMPRESSED_PUBLIC_KEY_LENGTH = 65;
 
-function wrappedLength(ephemeralKeyLength: number, { nonceLength }: Cipher): number {
-  return ephemeralKeyLength + nonceLength + TAG_LENGTH + SHAMIR_SHARE_LENGTH;
+/** The length of the ephemeral key E, the first field of a wrapped share. */
+export function ephemeralKeyLength(
+  suite: Pick<Suite, "ellipticCurve" | "isEphemeralKeyCompressed">
+): number {
+  if (suite.ellipticCurve !== "secp256k1") {
+    return CURVE25519_PUBLIC_KEY_LENGTH;
+  }
+  return suite.isEphemeralKeyCompressed
+    ? COMPRESSED_PUBLIC_KEY_LENGTH
+    : UNCOMPRESSED_PUBLIC_KEY_LENGTH;
+}
+
+function withWrappedLength(fields: Omit<Suite, "wrappedLength">): Suite {
+  return {
+    ...fields,
+    wrappedLength:
+      ephemeralKeyLength(fields) + fields.nonceLength + TAG_LENGTH + SHAMIR_SHARE_LENGTH,
+  };
 }
 
 // the columns follow SPEC.md's table: ephemeral key, HKDF input, then cipher and nonce
@@ -41,20 +63,13 @@ function secp256k1(
   hkdfInput: PointEncoding,
   cipher: Cipher
 ): Suite {
-  const isEphemeralKeyCompressed = ephemeralKey === "compressed";
-  return {
+  return withWrappedLength({
     id,
     ellipticCurve: "secp256k1",
-    isEphemeralKeyCompressed,
+    isEphemeralKeyCompressed: ephemeralKey === "compressed",
     isHkdfKeyCompressed: hkdfInput === "compressed",
     ...cipher,
-    wrappedLength: wrappedLength(
-      isEphemeralKeyCompressed
-        ? COMPRESSED_PUBLIC_KEY_LENGTH
-        : UNCOMPRESSED_PUBLIC_KEY_LENGTH,
-      cipher
-    ),
-  };
+  });
 }
 
 function curve25519(
@@ -62,14 +77,13 @@ function curve25519(
   ellipticCurve: "x25519" | "ed25519",
   cipher: Cipher
 ): Suite {
-  return {
+  return withWrappedLength({
     id,
     ellipticCurve,
     isEphemeralKeyCompressed: false,
     isHkdfKeyCompressed: false,
     ...cipher,
-    wrappedLength: wrappedLength(CURVE25519_PUBLIC_KEY_LENGTH, cipher),
-  };
+  });
 }
 
 const SUITES = new Map(
@@ -98,4 +112,36 @@ const SUITES = new Map(
 /** The suite with this ID, or undefined if the table doesn't list it. */
 export function getSuite(id: number): Suite | undefined {
   return SUITES.get(id);
+}
+
+/** The fields of eciesjs's `Config` that pick a suite. */
+export type SuiteConfig = Pick<
+  Config,
+  | "ellipticCurve"
+  | "isEphemeralKeyCompressed"
+  | "isHkdfKeyCompressed"
+  | "symmetricAlgorithm"
+  | "symmetricNonceLength"
+>;
+
+/**
+ * The suite these `Config` fields pick, or undefined if no row matches. Like eciesjs, it
+ * ignores the compression options off secp256k1, and the nonce length for XChaCha20.
+ */
+export function suiteFor(config: SuiteConfig): Suite | undefined {
+  for (const suite of SUITES.values()) {
+    const sameCurve = suite.ellipticCurve === config.ellipticCurve;
+    const sameKeyEncodings =
+      suite.ellipticCurve !== "secp256k1" ||
+      (suite.isEphemeralKeyCompressed === config.isEphemeralKeyCompressed &&
+        suite.isHkdfKeyCompressed === config.isHkdfKeyCompressed);
+    const sameCipher =
+      suite.symmetricAlgorithm === config.symmetricAlgorithm &&
+      (suite.symmetricAlgorithm === "xchacha20" ||
+        suite.nonceLength === config.symmetricNonceLength);
+    if (sameCurve && sameKeyEncodings && sameCipher) {
+      return suite;
+    }
+  }
+  return undefined;
 }
